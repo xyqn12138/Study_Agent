@@ -288,6 +288,37 @@ class Retriever:
             logger.info("Complex query: direct L3/L4 search")
 
         reranked_results = self.rerank(query, search_results, top_n=rerank_top_n)
+
+        # --- Pack expansion: enrich results with learned knowledge packs ---
+        try:
+            from agent.rag.knowledge_pack import get_pack_manager
+            pack_mgr = get_pack_manager()
+            hit_ids = [r["chunk_id"] for r in reranked_results]
+            pack_expansions = pack_mgr.get_packs_for_chunks(hit_ids)
+            if pack_expansions:
+                existing_ids = set(hit_ids)
+                new_ids: list[str] = []
+                for related_ids in pack_expansions.values():
+                    for cid in related_ids:
+                        if cid not in existing_ids:
+                            new_ids.append(cid)
+                            existing_ids.add(cid)
+                # Cap to prevent context pollution
+                new_ids = new_ids[:12]
+                if new_ids:
+                    extra = self.milvus_manager.query_by_chunk_ids(
+                        new_ids,
+                        output_fields=["text", "chunk_id", "parent_chunk_id", "root_chunk_id",
+                                       "chunk_level", "filename", "title_path", "content_type",
+                                       "page_number", "image_paths"],
+                    )
+                    for c in extra:
+                        c["_from_pack"] = True
+                        reranked_results.append(c)
+                    logger.info(f"[Pack] Expanded {len(extra)} chunk(s) from knowledge packs")
+        except Exception as e:
+            logger.warning(f"[Pack] Expansion error (non-fatal): {e}")
+
         final_contexts = self.fetch_multi_layer_context(reranked_results)
         return final_contexts
 

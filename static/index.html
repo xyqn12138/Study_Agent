@@ -105,6 +105,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 .ans img[src*="/api/images/"]{max-width:300px;max-height:200px;border-radius:8px;cursor:pointer;border:1px solid var(--bd);margin:4px;object-fit:cover;transition:transform .15s}
 .ans img[src*="/api/images/"]:hover{transform:scale(1.02);border-color:var(--ac)}
 .cur::after{content:'▋';color:var(--ac);animation:bl 1s step-end infinite;margin-left:1px}
+
+/* ===== Message Actions ===== */
+.msg-actions{display:flex;gap:6px;margin-top:8px;opacity:0;transition:opacity .15s}
+.msg-a:hover .msg-actions,.msg-actions.show{opacity:1}
+.act-btn{background:var(--bg-card);border:1px solid var(--bd);color:var(--tx2);font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:4px;transition:all .12s}
+.act-btn:hover{border-color:var(--ac);color:var(--tx);background:var(--ac-glow)}
+.act-btn svg{width:13px;height:13px}
+.act-btn.continue-btn{border-color:var(--ac);color:var(--ac);background:var(--ac-glow);font-weight:500;animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(139,92,246,.3)}50%{box-shadow:0 0 0 6px rgba(139,92,246,0)}}
 .ans.thinking-phase{opacity:.7;font-size:13px;border-left:2px solid var(--ac);padding-left:12px;margin-left:4px}
 .inp-area{padding:8px 12px 14px;display:flex;justify-content:center;flex-shrink:0;background:var(--bg)}
 .inp-wrap{width:100%;max-width:var(--mw);background:var(--bg-in);border:1px solid var(--bd);border-radius:22px;padding:6px 6px 6px 16px;display:flex;align-items:flex-end;gap:6px;transition:border-color .2s}
@@ -294,7 +303,7 @@ function renderMsgs(){
   const w=document.getElementById('welcome'),m=document.getElementById('msgs'),t=document.getElementById('pageTitle');
   if(!curId||!convs[curId]){w.style.display='';m.style.display='none';t.textContent='新对话';return}
   const c=convs[curId];w.style.display='none';m.style.display='';t.textContent=c.title;
-  m.innerHTML=c.msgs.map(msgHtml).join('');scrollBtm();
+  m.innerHTML=c.msgs.map((msg,i)=>msgHtml(msg,i)).join('');scrollBtm();
 }
 function renderSteps(steps,isDone){
   return steps.map(s=>{
@@ -303,7 +312,7 @@ function renderSteps(steps,isDone){
     return reasoning?`<div class="ts"><div>${reasoning}</div></div>`:`<div class="ts"><div class="sd">${esc(s.tool)}...</div></div>`;
   }).join('');
 }
-function msgHtml(m){
+function msgHtml(m,idx){
   if(m.role==='user')return `<div class="msg msg-u"><div class="bod"><div class="cont">${esc(m.content)}</div></div></div>`;
   let th='';
   if(m.thinking&&m.thinking.length){
@@ -311,7 +320,9 @@ function msgHtml(m){
     th=`<div class="think"><div class="think-h" onclick="toggleTh(this)"><span class="arr">▶</span>思考过程 (${m.thinking.length} 步)</div><div class="think-b">${stepsHtml}</div></div>`;
   }
   const html=m.content?renderImages(marked.parse(m.content)):'';
-  return `<div class="msg msg-a"><div class="bod">${th}<div class="ans">${html}</div></div></div>`;
+  const copyBtn=`<button class="act-btn" onclick="copyMsg(this)" title="复制"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>复制</button>`;
+  const regenBtn=`<button class="act-btn" onclick="regenMsg(${idx!==undefined?idx:-1})" title="重新生成"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>返回</button>`;
+  return `<div class="msg msg-a"><div class="bod">${th}<div class="ans">${html}</div><div class="msg-actions">${copyBtn}${regenBtn}</div></div></div>`;
 }
 function toggleTh(h){const b=h.nextElementSibling,a=h.querySelector('.arr');b.classList.toggle('open');a.classList.toggle('open')}
 function scrollBtm(){const el=document.getElementById('chatWrap');requestAnimationFrame(()=>el.scrollTop=el.scrollHeight)}
@@ -328,15 +339,14 @@ async function send(){
   if(c.msgs.length===1){c.title=text.slice(0,30);document.getElementById('pageTitle').textContent=c.title}
   renderList();const ai=c.msgs.length;c.msgs.push({role:'ai',content:'',thinking:[]});
   inp.value='';inp.style.height='auto';renderMsgs();streaming=true;document.getElementById('sndBtn').disabled=true;
+  const m=c.msgs[ai];
+  let answerSplit=-1;
   try{
     const hist=c.msgs.slice(0,-1).filter(m=>m.role==='user'||(m.role==='ai'&&m.content)).map(m=>({role:m.role==='ai'?'assistant':m.role,content:m.content}));
     const sendId=curId.startsWith('_pending_')?'':curId;
     const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,history:hist,conv_id:sendId})});
     if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`服务端错误 ${res.status}: ${errText.slice(0,200)}`)}
     const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
-    // All tokens go to m.content. answerSplit tracks where answer starts (-1 = not yet)
-    let answerSplit=-1;
-    const m=c.msgs[ai];
     while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});
       const lines=buf.split('\n');buf=lines.pop()||'';let evt=null;
       for(const ln of lines){if(ln.startsWith('event: '))evt=ln.slice(7).trim();
@@ -357,10 +367,15 @@ async function send(){
             upd(ai,m,answerSplit);
             if(d.conv_id&&curId.startsWith('_pending_')){const oldId=curId;curId=d.conv_id;convs[curId]=convs[oldId];delete convs[oldId];renderList()}}
           else if(evt==='error'){m.content+=`\n\n❌ ${d.message}`;upd(ai,m,answerSplit)}
+          else if(evt==='recursion_limit'){
+            m._recursionLimit=true;upd(ai,m,answerSplit);
+            showContinueBtn(ai,m,answerSplit)}
           evt=null;}}}
-    upd(ai,m,answerSplit);
-  }catch(e){c.msgs[ai].content=`❌ 请求失败: ${e.message}`;upd(ai,c.msgs[ai],-1)}
-  streaming=false;document.getElementById('sndBtn').disabled=false;document.getElementById('inp').focus();
+  }catch(e){m.content=`❌ 请求失败: ${e.message}`;upd(ai,m,-1)}
+  streaming=false;
+  // Final render with images (streaming=false enables renderImages)
+  upd(ai,m,answerSplit);
+  document.getElementById('sndBtn').disabled=false;document.getElementById('inp').focus();
 }
 
 function upd(idx,m,split){
@@ -382,9 +397,15 @@ function upd(idx,m,split){
     if(hasAnswer)th=`<div class="think"><div class="think-h" onclick="toggleTh(this)"><span class="arr">▶</span>思考过程 (${steps.length} 步)</div><div class="think-b">${stepsHtml}</div></div>`;
     else th=`<div class="think"><div class="think-h"><div class="spin"></div><span>思考中...</span></div><div class="think-b open">${stepsHtml}</div></div>`}
   const parsed=answer?marked.parse(answer):'';
-  const html=parsed?renderImages(parsed):'';
+  // Only render images when not streaming (prevents repeated image loading on each token)
+  const html=parsed?(streaming?parsed:renderImages(parsed)):'';
   const cur=streaming&&hasAnswer?'cur':'';
-  el.querySelector('.bod').innerHTML=th+`<div class="ans ${cur}">${html}</div>`;
+  // Show action buttons only when not streaming and has answer
+  let actions='';
+  if(!streaming&&hasAnswer){
+    actions=`<div class="msg-actions show"><button class="act-btn" onclick="copyMsg(this)" title="复制"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>复制</button><button class="act-btn" onclick="regenMsg(${idx})" title="重新生成"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>返回</button></div>`;
+  }
+  el.querySelector('.bod').innerHTML=th+`<div class="ans ${cur}">${html}</div>`+actions;
   expandImgRefs(el.querySelector('.bod'));scrollBtm();
   }catch(e){console.error('upd error:',e)}
 }
@@ -459,6 +480,69 @@ function renderImages(html){
 function expandImgRefs(el){el.querySelectorAll('.img-grid img').forEach(img=>{img.onclick=()=>viewImg(img.src)})}
 function viewImg(src){const v=document.getElementById('imgViewer');v.querySelector('img').src=src;v.classList.add('show')}
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+/* ===== Message Actions ===== */
+function copyMsg(btn){
+  const ans=btn.closest('.bod').querySelector('.ans');
+  if(!ans)return;
+  const text=ans.innerText||ans.textContent;
+  navigator.clipboard.writeText(text).then(()=>{
+    btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>已复制';
+    setTimeout(()=>{btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>复制'},1500);
+  });
+}
+
+function regenMsg(idx){
+  if(streaming)return;
+  const c=convs[curId];if(!c||idx<0)return;
+  // Find the user message before this assistant message
+  let userIdx=-1;
+  for(let i=idx-1;i>=0;i--){if(c.msgs[i].role==='user'){userIdx=i;break}}
+  if(userIdx<0)return;
+  // Put the user message back into the input box
+  const userText=c.msgs[userIdx].content;
+  document.getElementById('inp').value=userText;
+  autoH(document.getElementById('inp'));
+  // Remove the user message and assistant message(s) after it
+  c.msgs.splice(userIdx);
+  renderMsgs();
+  document.getElementById('inp').focus();
+}
+
+function showContinueBtn(aiIdx,m,answerSplit){
+  const els=document.querySelectorAll('#msgs .msg-a');
+  const c=convs[curId];
+  let n=0;
+  for(let i=0;i<=aiIdx;i++)if(c.msgs[i].role==='ai')n++;
+  const el=els[n-1];if(!el)return;
+  const actions=el.querySelector('.msg-actions');
+  if(!actions)return;
+  // Add continue button
+  const contBtn=document.createElement('button');
+  contBtn.className='act-btn continue-btn';
+  contBtn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>继续';
+  contBtn.onclick=()=>continueMsg(aiIdx);
+  actions.appendChild(contBtn);
+  actions.classList.add('show');
+}
+
+function continueMsg(aiIdx){
+  if(streaming)return;
+  const c=convs[curId];if(!c)return;
+  // Find the last user message
+  let lastUser='';
+  for(let i=aiIdx-1;i>=0;i--){if(c.msgs[i].role==='user'){lastUser=c.msgs[i].content;break}}
+  if(!lastUser)return;
+  // Remove the continue button
+  const els=document.querySelectorAll('#msgs .msg-a');
+  let n=0;
+  for(let i=0;i<=aiIdx;i++)if(c.msgs[i].role==='ai')n++;
+  const el=els[n-1];
+  if(el){const cb=el.querySelector('.continue-btn');if(cb)cb.remove()}
+  // Re-send with existing context
+  document.getElementById('inp').value='请继续上面的回答';
+  send();
+}
 
 initConvs();
 </script>

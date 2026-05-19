@@ -10,12 +10,19 @@ from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import re
+
 from agent.graph import build_graph
 from agent.persistence import get_store
 from agent.rag.data_embedding import RAGPipelineService
+from agent.rag.knowledge_pack import get_pack_manager
 from agent.security import check_message
 from agent.utils.logger_handler import get_logger
 from agent.utils.path_handler import get_absolute_path
+
+# Regex to extract chunk_id from tool outputs
+# Captures prefix and level_seq separately to preserve spaces in prefix
+_CHUNK_ID_RE = re.compile(r"chunk_id[=:]\s*(.*?)(_L\d+_\d+)")
 
 load_dotenv()
 logger = get_logger()
@@ -297,6 +304,9 @@ async def chat(request: Request):
         # Track content length at each tool start — reasoning text accumulates
         # between tools, and the answer is everything after the last tool's position
         last_tool_content_len = 0
+        # Pack learning: track chunk IDs that entered LLM context
+        final_context_ids: set[str] = set()
+        pack_mgr = get_pack_manager()
 
         try:
             # Security check before invoking the graph
@@ -340,10 +350,22 @@ async def chat(request: Request):
                     if hasattr(output, "content"):
                         output = output.content or ""
                     if not isinstance(output, str):
-                        output = str(output)[:200]
+                        output = str(output)
+
+                    # Extract chunk IDs from FULL output before truncation
+                    if output:
+                        # Reconstruct full chunk IDs from match groups (preserves spaces in prefix)
+                        matches = _CHUNK_ID_RE.findall(output)
+                        found_ids = [f"{prefix}{level_seq}" for prefix, level_seq in matches]
+                        logger.info(f"[Pack-Debug] tool={event.get('name','')}, output_len={len(output)}, found_ids={found_ids[:5]}")
+                        if found_ids:
+                            final_context_ids.update(found_ids)
+                            pack_mgr.record_expansion(found_ids)
+
+                    display_output = output[:200] if isinstance(output, str) else str(output)[:200]
                     if thinking_steps:
-                        thinking_steps[-1]["result"] = output[:200]
-                    yield _sse("tool_result", {"output": output[:200]})
+                        thinking_steps[-1]["result"] = display_output
+                    yield _sse("tool_result", {"output": display_output})
 
                 elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk", {})
@@ -380,8 +402,14 @@ async def chat(request: Request):
                                     final_content = last.get("content", "")
 
         except Exception as e:
-            logger.error(f"Stream error: {e}", exc_info=True)
-            yield _sse("error", {"message": str(e)})
+            # Check if it's a recursion limit error
+            err_str = str(e)
+            if "Recursion limit" in err_str or "GRAPH_RECURSION_LIMIT" in err_str:
+                logger.warning(f"Graph recursion limit reached")
+                yield _sse("recursion_limit", {"message": "思考步骤较多，已暂停。点击「继续」让 AI 继续回答。"})
+            else:
+                logger.error(f"Stream error: {e}", exc_info=True)
+                yield _sse("error", {"message": str(e)})
 
         # Fallback: if no tokens were streamed but we have final content
         if not got_tokens and final_content:
@@ -403,6 +431,12 @@ async def chat(request: Request):
             )
         except Exception as e:
             logger.error(f"Failed to save message: {e}")
+
+        # Pack learning: finalize packs from this conversation
+        try:
+            pack_mgr.finalize_packs(final_context_ids)
+        except Exception as e:
+            logger.error(f"Failed to finalize packs: {e}")
 
         yield _sse("done", {"conv_id": conv_id})
 
