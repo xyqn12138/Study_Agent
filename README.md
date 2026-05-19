@@ -20,16 +20,16 @@ PDF / Markdown 文档
   └──────┬───────┘     └──────────────┘     └──────────────────┘
          │
          ▼
-  ┌──────────────┐
-  │ LangGraph    │     ┌──────────────────────────────────────┐
-  │ ReAct Agent  │────▶│ tools: search / context / image / web│
+  ┌──────────────┐     ┌──────────────────────────────────────┐
+  │ LangGraph    │     │ tools: search / context / image / web│
+  │ ReAct Agent  │────▶│                                      │
   └──────┬───────┘     └──────────────────────────────────────┘
          │
          ▼
-  ┌──────────────┐     ┌──────────────────┐
-  │  FastAPI     │────▶│  Web 前端界面     │
-  │  SSE 流式    │     │  (ChatGPT 风格)   │
-  └──────────────┘     └──────────────────┘
+  ┌──────────────┐     ┌──────────────────┐     ┌──────────────────┐
+  │  FastAPI     │────▶│  Web 前端界面     │     │  Security Guard  │
+  │  SSE 流式    │     │  (ChatGPT 风格)   │     │  (输入安全审计)   │
+  └──────────────┘     └──────────────────┘     └──────────────────┘
 ```
 
 ## 四层分块体系
@@ -77,10 +77,48 @@ PDF / Markdown 文档
 3. **Hybrid Search**：Dense（语义向量）+ BM25（稀疏关键词）双路检索，RRF 融合
 4. **Rerank**：qwen3-rerank 精排，top10 召回 → top3 精选
 5. **Multi-layer Context**：命中 chunk → 回溯 L1/L2/L3 祖先节点，组装完整上下文
+6. **Pack Expansion**：命中 chunk 属于已知知识包时，自动扩展相关 chunk（见下文）
 
 ### 质量自适应
 
 RAG Tool 支持 `mode=auto`：当 rerank 置信度低于阈值时，自动升级为 HyDE 模式重检索。
+
+## 知识包学习（Knowledge Pack）
+
+系统会从对话中学习，自动记录有效的 chunk 组合，让检索越来越聪明。
+
+### 原理
+
+```
+对话 N: Agent 检索 → 多个 chunk 进入 LLM 上下文 → 同一 L2 下的 chunk 被记录为知识包
+对话 N+1: 新查询命中某个 chunk → 自动扩展知识包中的其他 chunk → Agent 获得完整上下文
+```
+
+### 机制
+
+- **自动学习**：当同一 L2 section 下有 2+ 个 chunk 共同进入最终 LLM 上下文时，自动形成知识包
+- **智能去重**：chunk 重叠 > 80% 的包自动合并，同一 L2 最多 5 个包
+- **自然衰减**：长期未命中的包自动清理，命中过的包自动强化
+- **文档隔离**：文档重新入库时自动清除相关包
+
+## 安全审计
+
+内置两阶段安全检查，防止 prompt 注入、token 滥用和话题偏移。
+
+### 检测策略
+
+| 阶段 | 方法 | 说明 |
+|------|------|------|
+| Stage 1 | 正则/关键词规则 | 零延迟拦截 prompt 注入、token 滥用（π位数/数学猜想）、图片滥用 |
+| Stage 2 | LLM 轻量分类 | 语义级检测话题偏移，max_tokens=10，仅在规则未命中时触发 |
+
+### 防护范围
+
+- **Prompt 注入**：中英文双语检测（忽略指令、角色切换、jailbreak 等）
+- **Token 滥用**：数学猜想证明、超长数字列出、大规模计算请求
+- **话题偏移**：娱乐八卦、游戏攻略、算命占卜等无关话题
+- **图片滥用**：访问非知识库资源、路径遍历攻击
+- **系统 prompt 保护**：在 system prompt 中注入安全边界指令
 
 ## Web 界面
 
@@ -94,6 +132,7 @@ RAG Tool 支持 `mode=auto`：当 rerank 置信度低于阈值时，自动升级
 - **文件上传**：支持 PDF / Markdown，带进度提示（MinerU 转换 → 知识库载入 → 向量化入库）
 - **知识库管理**：`data/knowledge.md` 记录已入库课本列表
 - **多轮对话**：左侧边栏管理多个对话
+- **消息操作**：复制回答、返回修改、继续生成（递归限制时）
 - **移动端适配**：响应式布局，手机端侧边栏滑出
 
 ### API 接口
@@ -101,9 +140,12 @@ RAG Tool 支持 `mode=auto`：当 rerank 置信度低于阈值时，自动升级
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `/` | GET | 返回前端页面 |
-| `/api/chat` | POST | SSE 流式聊天（`event: thinking/token/tool_result/done`） |
+| `/api/chat` | POST | SSE 流式聊天（`event: thinking/token/tool_result/done/recursion_limit`） |
 | `/api/upload` | POST | 文件上传入库 |
 | `/api/knowledge` | GET | 获取已入库课本列表 |
+| `/api/images/{path}` | GET | 知识库图片服务（路径遍历防护） |
+| `/api/conversations` | GET | 对话列表 |
+| `/api/conversations/{id}` | GET/DELETE | 获取/删除对话 |
 
 ## Agent 工具
 
@@ -118,9 +160,10 @@ RAG Tool 支持 `mode=auto`：当 rerank 置信度低于阈值时，自动升级
 
 ```
 src/agent/
-├── server.py                   # FastAPI Web 服务 + SSE 流式接口
-├── graph.py                    # LangGraph Agent 定义
+├── server.py                   # FastAPI Web 服务 + SSE 流式接口 + 安全检查
+├── graph.py                    # LangGraph Agent 定义 + 系统 prompt
 ├── agent.py                    # CLI 交互式对话入口
+├── persistence.py              # SQLite 对话持久化
 ├── rag/
 │   ├── Loader/
 │   │   ├── base_loader.py      # 加载器基类
@@ -131,7 +174,12 @@ src/agent/
 │   │   └── md_splitter.py      # Markdown 四层分块器
 │   ├── data_embedding.py       # 入库管线：chunk → embedding → Milvus
 │   ├── milvus_manage.py        # Milvus 客户端
-│   └── retriever.py            # 检索管线：路由 → 混合检索 → 重排序
+│   ├── retriever.py            # 检索管线：路由 → 混合检索 → 重排序 → Pack 扩展
+│   └── knowledge_pack.py       # 知识包学习：记录、去重、衰减、扩展
+├── security/
+│   ├── __init__.py             # 导出 check_message
+│   ├── guard.py                # 两阶段安全检查（规则 + LLM）
+│   └── patterns.py             # 正则模式、关键词列表
 ├── models/
 │   ├── chat_model.py           # 对话模型（多 Provider）
 │   ├── embedding_model.py      # Embedding 模型
@@ -139,7 +187,7 @@ src/agent/
 ├── tools/
 │   ├── rag_tool.py             # 知识库检索工具
 │   ├── context_tool.py         # 邻居上下文工具
-│   ├── image_tool.py           # 图片查看工具
+│   ├── image_tool.py           # 图片查看工具（路径白名单校验）
 │   └── web_tool.py             # Web 搜索工具
 ├── utils/
 │   ├── logger_handler.py       # 日志
@@ -151,6 +199,7 @@ static/
 └── index.html                  # Web 前端（单文件，内联 CSS/JS）
 
 data/
+├── chat.db                     # SQLite 对话数据库（含 knowledge_packs 表）
 ├── processed_md5.txt           # 已入库文档去重记录
 ├── knowledge.md                # 已入库课本列表
 └── ...                         # 上传的文档和 MinerU 输出
