@@ -18,7 +18,7 @@ def web_search(query: str) -> str:
     """
     try:
         client = ZhipuAiClient(
-            api_key=os.getenv("ZHIPU_API_KEY")
+            api_key=os.getenv("ZHIPUAI_API_KEY")
         )
         response = client.web_search.web_search(
             search_engine="search_pro",

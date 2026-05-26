@@ -394,12 +394,14 @@ function upd(idx,m,split){
   if(hasThinking){
     const steps=m.thinking.map((st,i)=>(i===m.thinking.length-1&&reasoning)?{...st,reasoning}:st);
     const stepsHtml=renderSteps(steps,hasAnswer);
-    if(hasAnswer)th=`<div class="think"><div class="think-h" onclick="toggleTh(this)"><span class="arr">▶</span>思考过程 (${steps.length} 步)</div><div class="think-b">${stepsHtml}</div></div>`;
+    const shouldCollapse=hasAnswer && !(streaming && hasThinking);
+    if(shouldCollapse)th=`<div class="think"><div class="think-h" onclick="toggleTh(this)"><span class="arr">▶</span>思考过程 (${steps.length} 步)</div><div class="think-b">${stepsHtml}</div></div>`;
     else th=`<div class="think"><div class="think-h"><div class="spin"></div><span>思考中...</span></div><div class="think-b open">${stepsHtml}</div></div>`}
-  const parsed=answer?marked.parse(answer):'';
-  // Only render images when not streaming (prevents repeated image loading on each token)
+  // While streaming with thinking, don't render content in answer area until split is known
+  const showAnswer=answer && !(streaming && hasThinking && !reasoning);
+  const parsed=showAnswer?marked.parse(answer):'';
   const html=parsed?(streaming?parsed:renderImages(parsed)):'';
-  const cur=streaming&&hasAnswer?'cur':'';
+  const cur=streaming&&showAnswer?'cur':'';
   // Show action buttons only when not streaming and has answer
   let actions='';
   if(!streaming&&hasAnswer){
