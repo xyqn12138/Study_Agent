@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RAGAS 测评</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#f5f5f5;--card:#fff;--border:#e0e0e0;--text:#333;--text2:#666;--primary:#4a90d9;--primary-h:#3a7bc8;--green:#4caf50;--yellow:#ff9800;--red:#f44336;--radius:8px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.container{max-width:1100px;margin:0 auto;padding:24px 20px}
+h1{font-size:24px;font-weight:600;margin-bottom:4px}
+.subtitle{color:var(--text2);font-size:14px;margin-bottom:24px}
+
+/* Upload */
+.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:40px;text-align:center;cursor:pointer;transition:border-color .2s,background .2s;background:var(--card);margin-bottom:16px}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--primary);background:#f0f6ff}
+.upload-zone input{display:none}
+.upload-icon{font-size:40px;margin-bottom:8px;color:var(--text2)}
+.upload-text{font-size:14px;color:var(--text2)}
+.upload-text b{color:var(--primary)}
+
+/* Preview table */
+.preview-wrap{background:var(--card);border-radius:var(--radius);border:1px solid var(--border);margin-bottom:16px;overflow:hidden}
+.preview-header{padding:12px 16px;font-size:14px;font-weight:600;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.preview-header .count{color:var(--text2);font-weight:400}
+.preview-table{width:100%;border-collapse:collapse;font-size:13px}
+.preview-table th,.preview-table td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.preview-table th{background:#fafafa;font-weight:600;color:var(--text2);position:sticky;top:0}
+.preview-scroll{max-height:260px;overflow-y:auto}
+
+/* Actions */
+.actions{margin-bottom:16px;display:flex;gap:12px;align-items:center}
+.btn{padding:10px 24px;border:none;border-radius:var(--radius);font-size:14px;font-weight:500;cursor:pointer;transition:background .2s}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:hover{background:var(--primary-h)}
+.btn-primary:disabled{background:#ccc;cursor:not-allowed}
+
+/* Progress */
+.progress-wrap{background:var(--card);border-radius:var(--radius);border:1px solid var(--border);padding:16px 20px;margin-bottom:16px;display:none}
+.progress-wrap.show{display:block}
+.progress-bar-bg{height:8px;background:#eee;border-radius:4px;overflow:hidden;margin-bottom:8px}
+.progress-bar{height:100%;background:var(--primary);border-radius:4px;transition:width .3s;width:0}
+.progress-text{font-size:13px;color:var(--text2)}
+.progress-q{font-size:13px;color:var(--text);margin-top:4px;font-style:italic}
+
+/* Results */
+.results{display:none}
+.results.show{display:block}
+.scores-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.score-card{background:var(--card);border-radius:var(--radius);border:1px solid var(--border);padding:20px;text-align:center}
+.score-label{font-size:13px;color:var(--text2);margin-bottom:8px}
+.score-value{font-size:32px;font-weight:700}
+.score-value.good{color:var(--green)}
+.score-value.mid{color:var(--yellow)}
+.score-value.bad{color:var(--red)}
+
+/* Detail table */
+.detail-wrap{background:var(--card);border-radius:var(--radius);border:1px solid var(--border);overflow:hidden}
+.detail-header{padding:12px 16px;font-size:15px;font-weight:600;border-bottom:1px solid var(--border)}
+.detail-table{width:100%;border-collapse:collapse;font-size:13px}
+.detail-table th{background:#fafafa;font-weight:600;color:var(--text2);padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);position:sticky;top:0}
+.detail-table td{padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+.detail-table .q-col{max-width:250px}
+.detail-table .score-cell{font-weight:600;text-align:center}
+.detail-table .score-cell.good{color:var(--green)}
+.detail-table .score-cell.mid{color:var(--yellow)}
+.detail-table .score-cell.bad{color:var(--red)}
+.ctx-toggle{color:var(--primary);cursor:pointer;font-size:12px;white-space:nowrap}
+.ctx-toggle:hover{text-decoration:underline}
+.ctx-list{display:none;margin-top:6px;padding:8px;background:#f9f9f9;border-radius:4px;font-size:12px;line-height:1.5;max-height:200px;overflow-y:auto;white-space:pre-wrap}
+.ctx-list.open{display:block}
+.ctx-item{margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid #eee}
+.ctx-item:last-child{border-bottom:none}
+
+@media(max-width:768px){
+  .scores-grid{grid-template-columns:repeat(2,1fr)}
+  .score-value{font-size:24px}
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>RAGAS 测评</h1>
+  <p class="subtitle">上传测试集（CSV / JSON），自动运行 RAG pipeline 并评估 Faithfulness、Answer Relevancy、Context Precision、Context Recall</p>
+
+  <div class="upload-zone" id="uploadZone">
+    <div class="upload-icon">📄</div>
+    <div class="upload-text">拖拽或 <b>点击上传</b> CSV / JSON 文件</div>
+    <div class="upload-text" style="margin-top:6px;font-size:12px">格式：question, ground_truth</div>
+    <input type="file" id="fileInput" accept=".csv,.json">
+  </div>
+
+  <div class="preview-wrap" id="preview" style="display:none">
+    <div class="preview-header">
+      <span>测试集预览</span>
+      <span class="count" id="previewCount"></span>
+    </div>
+    <div class="preview-scroll">
+      <table class="preview-table">
+        <thead><tr><th>#</th><th>Question</th><th>Ground Truth</th></tr></thead>
+        <tbody id="previewBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn btn-primary" id="runBtn" disabled>开始评估</button>
+    <span id="statusText" style="font-size:13px;color:var(--text2)"></span>
+  </div>
+
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar-bg"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="progress-text" id="progressText">准备中...</div>
+    <div class="progress-q" id="progressQ"></div>
+  </div>
+
+  <div class="results" id="results">
+    <div class="scores-grid" id="scoresGrid"></div>
+    <div class="detail-wrap">
+      <div class="detail-header">评估明细</div>
+      <table class="detail-table">
+        <thead><tr><th>#</th><th>Question</th><th>Answer</th><th>Ground Truth</th><th>F</th><th>AR</th><th>CP</th><th>CR</th><th>Contexts</th></tr></thead>
+        <tbody id="detailBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="history-wrap" id="historyWrap" style="margin-top:24px">
+    <div class="detail-header" style="cursor:pointer" onclick="loadHistory()">历史评估记录 (点击刷新)</div>
+    <div id="historyList" style="padding:12px;font-size:13px;color:var(--text2)">加载中...</div>
+  </div>
+</div>
+
+<script>
+const METRIC_LABELS={faithfulness:'Faithfulness',answer_relevancy:'Answer Relevancy',context_precision:'Context Precision',context_recall:'Context Recall'};
+const SHORT={faithfulness:'F',answer_relevancy:'AR',context_precision:'CP',context_recall:'CR'};
+let testCases=[];
+
+// File upload
+const zone=document.getElementById('uploadZone'),fileInput=document.getElementById('fileInput');
+zone.addEventListener('click',()=>fileInput.click());
+zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dragover')});
+zone.addEventListener('dragleave',()=>zone.classList.remove('dragover'));
+zone.addEventListener('drop',e=>{e.preventDefault();zone.classList.remove('dragover');if(e.dataTransfer.files.length)handleFile(e.dataTransfer.files[0])});
+fileInput.addEventListener('change',e=>{if(e.target.files.length)handleFile(e.target.files[0])});
+
+function handleFile(file){
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const text=e.target.result;
+    try{
+      if(file.name.endsWith('.json'))parseJSON(text);
+      else parseCSV(text);
+    }catch(err){alert('解析失败: '+err.message)}
+  };
+  reader.readAsText(file,'utf-8');
+}
+
+function parseCSV(text){
+  const lines=text.trim().split('\n');
+  if(lines.length<2)throw new Error('CSV 至少需要表头+1行数据');
+  const header=lines[0].split(',').map(s=>s.trim().toLowerCase());
+  const qi=header.findIndex(h=>h==='question'),gi=header.findIndex(h=>h==='ground_truth'||h==='groundtruth'||h==='reference');
+  if(qi<0||gi<0)throw new Error('CSV 需要 question 和 ground_truth 列');
+  testCases=[];
+  for(let i=1;i<lines.length;i++){
+    const cols=parseCSVLine(lines[i]);
+    if(cols[qi]&&cols[gi])testCases.push({question:cols[qi].trim(),ground_truth:cols[gi].trim()});
+  }
+  showPreview();
+}
+
+function parseCSVLine(line){
+  const result=[];let current='',inQuotes=false;
+  for(let i=0;i<line.length;i++){
+    const c=line[i];
+    if(c==='"'){if(inQuotes&&line[i+1]==='"'){current+='"';i++}else inQuotes=!inQuotes}
+    else if(c===','&&!inQuotes){result.push(current);current=''}
+    else current+=c;
+  }
+  result.push(current);
+  return result;
+}
+
+function parseJSON(text){
+  const data=JSON.parse(text);
+  const arr=Array.isArray(data)?data:data.test_cases||data.data;
+  if(!Array.isArray(arr))throw new Error('JSON 格式不正确');
+  testCases=arr.map(d=>({question:d.question||d.q,ground_truth:d.ground_truth||d.groundtruth||d.reference||d.gt})).filter(d=>d.question&&d.ground_truth);
+  if(!testCases.length)throw new Error('未找到有效的 question/ground_truth 数据');
+  showPreview();
+}
+
+function showPreview(){
+  document.getElementById('preview').style.display='';
+  document.getElementById('previewCount').textContent=`共 ${testCases.length} 条`;
+  const body=document.getElementById('previewBody');
+  body.innerHTML=testCases.map((c,i)=>`<tr><td>${i+1}</td><td>${esc(c.question)}</td><td>${esc(c.ground_truth)}</td></tr>`).join('');
+  document.getElementById('runBtn').disabled=false;
+  document.getElementById('results').classList.remove('show');
+  document.getElementById('statusText').textContent='';
+}
+
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+let gotResult=false;
+
+// Run evaluation
+document.getElementById('runBtn').addEventListener('click',async()=>{
+  if(!testCases.length)return;
+  const btn=document.getElementById('runBtn');
+  btn.disabled=true;btn.textContent='评估中...';
+  gotResult=false;
+  document.getElementById('progressWrap').classList.add('show');
+  document.getElementById('results').classList.remove('show');
+  document.getElementById('statusText').textContent='评估进行中，请勿关闭页面';
+  document.getElementById('statusText').style.color='var(--text2)';
+
+  try{
+    const res=await fetch('/api/eval/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_cases:testCases})});
+    if(!res.ok)throw new Error(`服务端错误 ${res.status}`);
+    const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
+    while(true){
+      const{done,value}=await reader.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split('\n');buf=lines.pop()||'';
+      let evt=null;
+      for(const ln of lines){
+        if(ln.startsWith('event: '))evt=ln.slice(7).trim();
+        else if(ln.startsWith('data: ')&&evt){
+          let d;try{d=JSON.parse(ln.slice(6))}catch(e){console.warn('JSON parse failed for event',evt,ln.slice(6,100));continue}
+          if(evt==='progress')onProgress(d);
+          else if(evt==='result'){gotResult=true;onResult(d);}
+          else if(evt==='done')onDone();
+          else if(evt==='error'){document.getElementById('statusText').textContent='错误: '+d.message;document.getElementById('statusText').style.color='var(--red)';}
+          evt=null;
+        }
+      }
+    }
+    // If stream ended without done event but we got results, still show them
+    if(gotResult)onDone();
+  }catch(err){
+    document.getElementById('statusText').textContent='错误: '+err.message;
+    document.getElementById('statusText').style.color='var(--red)';
+  }
+  btn.disabled=false;btn.textContent='开始评估';
+  loadHistory();
+});
+
+function onProgress(d){
+  const pct=Math.round(d.current/d.total*100);
+  document.getElementById('progressBar').style.width=pct+'%';
+  document.getElementById('progressText').textContent=`评估中 ${d.current}/${d.total} (${pct}%)`;
+  document.getElementById('progressQ').textContent=d.question||'';
+}
+
+function onResult(d){
+  // Score cards
+  const grid=document.getElementById('scoresGrid');
+  grid.innerHTML='';
+  for(const[k,label]of Object.entries(METRIC_LABELS)){
+    const v=d.scores[k];
+    const cls=v>=0.7?'good':v>=0.4?'mid':'bad';
+    grid.innerHTML+=`<div class="score-card"><div class="score-label">${label}</div><div class="score-value ${cls}">${v!=null?v.toFixed(2):'N/A'}</div></div>`;
+  }
+
+  // Detail table
+  const body=document.getElementById('detailBody');
+  body.innerHTML='';
+  d.details.forEach((item,i)=>{
+    const s=item.scores;
+    const cells=['faithfulness','answer_relevancy','context_precision','context_recall'].map(k=>{
+      const v=s[k];const cls=v>=0.7?'good':v>=0.4?'mid':'bad';
+      return `<td class="score-cell ${cls}">${v!=null?v.toFixed(2):'N/A'}</td>`;
+    }).join('');
+    const ctxId='ctx_'+i;
+    body.innerHTML+=`<tr>
+      <td>${i+1}</td>
+      <td class="q-col">${esc(item.question)}</td>
+      <td class="q-col">${esc(item.answer)}</td>
+      <td class="q-col">${esc(item.ground_truth)}</td>
+      ${cells}
+      <td><span class="ctx-toggle" onclick="toggleCtx('${ctxId}',this)">查看 (${item.contexts.length})</span><div class="ctx-list" id="${ctxId}">${item.contexts.map((c,j)=>`<div class="ctx-item"><b>[${j+1}]</b> ${esc(c)}</div>`).join('')}</div></td>
+    </tr>`;
+  });
+
+  document.getElementById('results').classList.add('show');
+}
+
+function onDone(){
+  document.getElementById('progressBar').style.width='100%';
+  document.getElementById('progressText').textContent='评估完成';
+  document.getElementById('progressQ').textContent='';
+  document.getElementById('statusText').textContent='评估完成';
+  document.getElementById('statusText').style.color='var(--green)';
+}
+
+function toggleCtx(id,el){
+  const div=document.getElementById(id);
+  div.classList.toggle('open');
+  el.textContent=div.classList.contains('open')?'收起':'查看 ('+div.querySelectorAll('.ctx-item').length+')';
+}
+
+// History
+async function loadHistory(){
+  try{
+    const res=await fetch('/api/eval/results');
+    if(!res.ok)return;
+    const list=await res.json();
+    const el=document.getElementById('historyList');
+    if(!list.length){el.textContent='暂无历史记录';return;}
+    el.innerHTML=list.map(r=>{
+      const scores=Object.entries(r.scores).map(([k,v])=>`${SHORT[k]||k}: ${v!=null?v.toFixed(2):'N/A'}`).join(' | ');
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="loadHistoryDetail('${r.id}')">
+        <b>${r.id}</b> (${r.total}条) — ${scores}
+      </div>`;
+    }).join('');
+  }catch(e){console.warn('loadHistory failed:',e)}
+}
+
+async function loadHistoryDetail(id){
+  try{
+    const res=await fetch(`/api/eval/results/${id}`);
+    if(!res.ok)return;
+    const d=await res.json();
+    if(d.scores)onResult(d);
+    document.getElementById('results').classList.add('show');
+  }catch(e){console.warn('loadHistoryDetail failed:',e)}
+}
+
+loadHistory();
+</script>
+</body>
+</html>

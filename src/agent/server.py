@@ -460,6 +460,101 @@ async def index():
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+# --- Evaluation endpoints ---
+@app.get("/eval", response_class=HTMLResponse)
+async def eval_page():
+    return (STATIC_DIR / "eval.html").read_text(encoding="utf-8")
+
+
+@app.post("/api/eval/run")
+async def eval_run(request: Request):
+    from agent.evaluation import EvalRunner
+
+    body = await request.json()
+    test_cases = body.get("test_cases", [])
+    if not test_cases:
+        return JSONResponse(status_code=400, content={"error": "test_cases is required"})
+
+    runner = EvalRunner()
+
+    async def event_stream():
+        try:
+            q: asyncio.Queue[str | None] = asyncio.Queue()
+
+            async def on_progress_cb(idx, total, question):
+                await q.put(_sse("progress", {"current": idx + 1, "total": total, "question": question}))
+
+            async def run_eval():
+                try:
+                    result = await runner.run_evaluation(test_cases, on_progress=on_progress_cb)
+                    # Persist results
+                    eval_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    eval_path = DATA_DIR / "eval_results"
+                    eval_path.mkdir(exist_ok=True)
+                    result_file = eval_path / f"{eval_id}.json"
+                    result_file.write_text(json.dumps({"test_cases": test_cases, **result}, ensure_ascii=False, indent=2), encoding="utf-8")
+                    logger.info(f"[Eval] Results saved to {result_file}")
+                    await q.put(_sse("result", result))
+                    await q.put(None)  # sentinel
+                except Exception as e:
+                    logger.error(f"Eval task error: {e}", exc_info=True)
+                    await q.put(_sse("error", {"message": str(e)}))
+                    await q.put(None)
+
+            task = asyncio.create_task(run_eval())
+
+            while True:
+                msg = await q.get()
+                if msg is None:
+                    break
+                yield msg
+
+            # Check if task had an unhandled exception
+            if task.exception():
+                yield _sse("error", {"message": str(task.exception())})
+
+        except Exception as e:
+            logger.error(f"Eval error: {e}", exc_info=True)
+            yield _sse("error", {"message": str(e)})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/eval/results")
+async def eval_results():
+    """List saved evaluation results."""
+    eval_path = DATA_DIR / "eval_results"
+    if not eval_path.exists():
+        return JSONResponse(content=[])
+    files = sorted(eval_path.glob("*.json"), reverse=True)
+    results = []
+    for f in files[:20]:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            results.append({
+                "id": f.stem,
+                "scores": data.get("scores", {}),
+                "total": len(data.get("test_cases", [])),
+            })
+        except Exception:
+            pass
+    return JSONResponse(content=results)
+
+
+@app.get("/api/eval/results/{eval_id}")
+async def eval_result_detail(eval_id: str):
+    """Get a specific evaluation result."""
+    eval_path = DATA_DIR / "eval_results" / f"{eval_id}.json"
+    if not eval_path.exists():
+        return JSONResponse(status_code=404, content={"error": "not found"})
+    data = json.loads(eval_path.read_text(encoding="utf-8"))
+    return JSONResponse(content=data)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("agent.server:app", host="0.0.0.0", port=8080, reload=True)

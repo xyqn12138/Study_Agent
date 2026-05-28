@@ -141,20 +141,53 @@ class Retriever:
         return reranked
 
     def fetch_multi_layer_context(self, search_results: List[Dict]) -> List[Dict]:
-        final_contexts = []
-        processed_ids = set()
+        """Build hierarchical contexts from search results.
 
-        all_ancestor_ids: set[str] = set()
+        Rules:
+        - L3 hits: return L3 text as search_hit, with L1/L2 ancestors.
+        - L4 hits: do NOT return L4 text. Instead return the L3 parent text as
+          search_hit, with L1/L2 ancestors. Multiple L4 hits sharing the same
+          L3 parent are merged into a single entry.
+        """
+        final_contexts: list[dict] = []
+
+        # --- Phase 1: classify hits ---
+        l3_hits: dict[str, dict] = {}   # chunk_id -> hit
+        l4_by_parent: dict[str, list[dict]] = {}  # parent_l3_id -> [l4 hits]
+        other_hits: list[dict] = []     # L2 or other
+
         for hit in search_results:
+            level = hit["chunk_level"]
             cid = hit["chunk_id"]
-            if cid in processed_ids:
+            if level == 4 and hit.get("parent_chunk_id"):
+                l4_by_parent.setdefault(hit["parent_chunk_id"], []).append(hit)
+            elif level == 3:
+                if cid not in l3_hits:
+                    l3_hits[cid] = hit
+            else:
+                other_hits.append(hit)
+
+        # L3 parents that are covered by L4 hits — skip them as standalone entries
+        l3_ids_from_l4: set[str] = set(l4_by_parent.keys())
+
+        # --- Phase 2: collect all ancestor IDs to fetch ---
+        all_ancestor_ids: set[str] = set()
+        # From L3 hits (standalone, not covered by L4)
+        for hit in l3_hits.values():
+            if hit["chunk_id"] in l3_ids_from_l4:
                 continue
-            processed_ids.add(cid)
             if hit.get("root_chunk_id"):
                 all_ancestor_ids.add(hit["root_chunk_id"])
             if hit.get("parent_chunk_id"):
                 all_ancestor_ids.add(hit["parent_chunk_id"])
+        # From L4 hits (need L3 parent + its ancestors)
+        for parent_id, l4_list in l4_by_parent.items():
+            all_ancestor_ids.add(parent_id)
+            for h in l4_list:
+                if h.get("root_chunk_id"):
+                    all_ancestor_ids.add(h["root_chunk_id"])
 
+        # Fetch ancestors
         ancestor_map: dict[str, dict] = {}
         if all_ancestor_ids:
             ancestor_list = list(all_ancestor_ids)
@@ -166,12 +199,17 @@ class Retriever:
                 for row in rows:
                     ancestor_map[row["chunk_id"]] = row
 
+            # Fetch missing L2 ancestors for L3 parents
             missing_l2_ids: set[str] = set()
-            for hit in search_results:
-                if hit["chunk_level"] == 4 and hit.get("parent_chunk_id"):
-                    parent = ancestor_map.get(hit["parent_chunk_id"])
-                    if parent and parent.get("chunk_level") == 3 and parent.get("parent_chunk_id"):
-                        missing_l2_ids.add(parent["parent_chunk_id"])
+            for parent_id in l3_ids_from_l4:
+                parent_node = ancestor_map.get(parent_id)
+                if parent_node and parent_node.get("parent_chunk_id"):
+                    missing_l2_ids.add(parent_node["parent_chunk_id"])
+            for hit in l3_hits.values():
+                if hit["chunk_id"] in l3_ids_from_l4:
+                    continue
+                if hit.get("parent_chunk_id"):
+                    missing_l2_ids.add(hit["parent_chunk_id"])
             missing_l2_ids -= ancestor_map.keys()
             if missing_l2_ids:
                 batch = list(missing_l2_ids)
@@ -182,12 +220,8 @@ class Retriever:
                     for row in rows:
                         ancestor_map[row["chunk_id"]] = row
 
-        processed_ids.clear()
-        for hit in search_results:
-            chunk_id = hit["chunk_id"]
-            if chunk_id in processed_ids:
-                continue
-
+        # --- Phase 3: build context entries ---
+        def _build_context(hit: dict) -> dict:
             context = {
                 "chunk_id": hit["chunk_id"],
                 "search_hit": hit["text"],
@@ -202,7 +236,6 @@ class Retriever:
                 "chunk3_text": hit["text"] if hit["chunk_level"] == 3 else "",
                 "chunk4_text": hit["text"] if hit["chunk_level"] == 4 else "",
             }
-
             ids_to_check: set[str] = set()
             if hit.get("root_chunk_id"):
                 ids_to_check.add(hit["root_chunk_id"])
@@ -212,26 +245,59 @@ class Retriever:
                 parent_node = ancestor_map.get(hit["parent_chunk_id"])
                 if parent_node and parent_node.get("parent_chunk_id"):
                     ids_to_check.add(parent_node["parent_chunk_id"])
-
             for aid in ids_to_check:
                 node = ancestor_map.get(aid)
                 if not node:
                     continue
-                level = node["chunk_level"]
-                if level == 1:
+                lv = node["chunk_level"]
+                if lv == 1:
                     context["chunk1_text"] = node["text"]
-                elif level == 2:
+                elif lv == 2:
                     context["chunk2_text"] = node["text"]
-                elif level == 3:
+                elif lv == 3:
                     context["chunk3_text"] = node["text"]
+            return context
 
-            if hit["chunk_level"] == 3:
-                context["chunk3_text"] = hit["text"]
-            elif hit["chunk_level"] == 2:
-                context["chunk2_text"] = hit["text"]
+        # (a) Standalone L3 hits (not covered by L4)
+        for cid, hit in l3_hits.items():
+            if cid in l3_ids_from_l4:
+                continue
+            final_contexts.append(_build_context(hit))
 
-            final_contexts.append(context)
-            processed_ids.add(chunk_id)
+        # (b) L4 hits → merge per L3 parent, use L3 text as search_hit
+        for parent_id, l4_list in l4_by_parent.items():
+            parent_node = ancestor_map.get(parent_id)
+            if not parent_node:
+                # Can't resolve parent, fall back to first L4 hit
+                final_contexts.append(_build_context(l4_list[0]))
+                continue
+
+            # Build context from the L3 parent, using first L4 as the base hit
+            base_hit = dict(l4_list[0])
+            base_hit["text"] = parent_node["text"]
+            base_hit["chunk_id"] = parent_id
+            base_hit["chunk_level"] = 3
+            base_hit["title_path"] = parent_node.get("title_path", base_hit.get("title_path", ""))
+            ctx = _build_context(base_hit)
+            # Override: search_hit and chunk3_text should be L3 parent text
+            ctx["search_hit"] = parent_node["text"]
+            ctx["chunk3_text"] = parent_node["text"]
+            ctx["chunk4_text"] = ""  # Do not include L4 text
+            ctx["chunk_id"] = parent_id
+            ctx["level"] = 3
+            # Merge image_paths from all L4 hits
+            all_images = []
+            for h in l4_list:
+                ip = h.get("image_paths", "")
+                if ip:
+                    all_images.append(ip)
+            if all_images:
+                ctx["image_paths"] = ";".join(dict.fromkeys(all_images))
+            final_contexts.append(ctx)
+
+        # (c) Other hits (L2 etc.)
+        for hit in other_hits:
+            final_contexts.append(_build_context(hit))
 
         return final_contexts
 
