@@ -18,6 +18,35 @@ from agent.rag.data_embedding import RAGPipelineService
 from agent.rag.knowledge_pack import get_pack_manager
 from agent.security import check_message
 from agent.utils.logger_handler import get_logger
+
+load_dotenv()
+
+COMPRESS_THRESHOLD = 20  # messages
+COMPRESS_KEEP = 5        # recent messages to keep
+
+SUMMARY_PROMPT = (
+    "请将以下对话历史压缩为一段简洁的摘要，保留关键信息、用户偏好和未完成的任务。"
+    "用中文输出，不超过300字。\n\n对话历史：\n{history}")
+
+
+async def compress_history(messages: list[dict]) -> str:
+    """Summarize old messages using DeepSeek V4 Flash."""
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+        base_url="https://api.deepseek.com",
+        timeout=60,
+    )
+    formatted = "\n".join(f"{m['role']}: {m['content'][:500]}" for m in messages)
+    prompt = SUMMARY_PROMPT.format(history=formatted)
+    resp = await asyncio.to_thread(
+        client.chat.completions.create,
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=512,
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content or ""
 from agent.utils.path_handler import get_absolute_path
 
 # Regex to extract chunk_id from tool outputs
@@ -210,6 +239,14 @@ async def serve_image(path: str):
         matches = list(DATA_DIR.rglob(filename))
         img_path = matches[0] if matches else None
 
+    # Fallback: prefix match for truncated filenames (no extension)
+    if not img_path and "." not in filename:
+        for ext in ("jpg", "jpeg", "png", "gif", "bmp", "webp", "svg"):
+            matches = list(DATA_DIR.rglob(f"{filename}*.{ext}"))
+            if matches:
+                img_path = matches[0]
+                break
+
     # Path traversal guard: ensure resolved path is within DATA_DIR
     if img_path and not img_path.resolve().is_relative_to(DATA_DIR.resolve()):
         logger.warning(f"[Security] Image path traversal blocked: {path}")
@@ -260,6 +297,13 @@ async def delete_conversation(conv_id: str):
     return {"status": "ok"}
 
 
+@app.delete("/api/conversations/{conv_id}/last")
+async def delete_last_messages(conv_id: str):
+    store = get_store()
+    deleted = store.delete_last_messages(conv_id, count=2)
+    return {"status": "ok", "deleted": deleted}
+
+
 TOOL_NAME_MAP = {
     "knowledge_base_search": "检索知识库",
     "fetch_neighbor_context": "获取上下文片段",
@@ -294,6 +338,20 @@ async def chat(request: Request):
     graph = _get_graph()
     messages = [{"role": msg["role"], "content": msg["content"]} for msg in history]
     messages.append({"role": "user", "content": message})
+
+    # Context compression: summarize old messages when too long
+    if len(messages) > COMPRESS_THRESHOLD:
+        try:
+            old = messages[:COMPRESS_THRESHOLD - COMPRESS_KEEP]
+            recent = messages[COMPRESS_THRESHOLD - COMPRESS_KEEP:]
+            summary = await compress_history(old)
+            if summary:
+                messages = [{"role": "system", "content": f"[对话摘要] {summary}"}] + recent
+                store.update_summary(conv_id, summary)
+                logger.info(f"[Compress] Summarized {len(old)} messages -> {len(summary)} chars")
+        except Exception as e:
+            logger.warning(f"[Compress] Failed (non-fatal): {e}")
+
     input_msg = {"messages": messages}
     config = {"recursion_limit": 50}
 

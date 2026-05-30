@@ -38,6 +38,10 @@ class ConversationStore:
             );
             CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, seq);
         """)
+        # Migrate: add summary column if missing
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "summary" not in cols:
+            self.conn.execute("ALTER TABLE conversations ADD COLUMN summary TEXT")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.commit()
@@ -87,6 +91,20 @@ class ConversationStore:
         self.conn.commit()
         return cur.rowcount > 0
 
+    # --- Summary ---
+    def update_summary(self, conv_id: str, summary: str) -> None:
+        self.conn.execute(
+            "UPDATE conversations SET summary = ?, updated_at = ? WHERE id = ?",
+            (summary, datetime.now().isoformat(timespec="seconds"), conv_id),
+        )
+        self.conn.commit()
+
+    def get_summary(self, conv_id: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT summary FROM conversations WHERE id = ?", (conv_id,)
+        ).fetchone()
+        return row["summary"] if row and row["summary"] else None
+
     # --- Messages ---
     def add_message(self, conv_id: str, role: str, content: str, thinking: list | None = None) -> int:
         max_seq = self.conn.execute(
@@ -127,6 +145,21 @@ class ConversationStore:
                 msg["thinking"] = []
             result.append(msg)
         return result
+
+    def delete_last_messages(self, conv_id: str, count: int = 2) -> int:
+        """Delete the last N messages from a conversation. Returns number deleted."""
+        rows = self.conn.execute(
+            "SELECT id FROM messages WHERE conv_id = ? ORDER BY seq DESC LIMIT ?",
+            (conv_id, count),
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [r["id"] for r in rows]
+        placeholders = ",".join("?" * len(ids))
+        cur = self.conn.execute(f"DELETE FROM messages WHERE id IN ({placeholders})", ids)
+        self.touch_conversation(conv_id)
+        self.conn.commit()
+        return cur.rowcount
 
 
 # Singleton

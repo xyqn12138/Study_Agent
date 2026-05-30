@@ -227,6 +227,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
     <div class="inp-area">
       <div class="inp-wrap">
         <textarea id="inp" rows="1" placeholder="输入你的问题..." onkeydown="onKey(event)" oninput="autoH(this)"></textarea>
+        <button class="snd" id="undoBtn" onclick="undoSend()" title="撤回上一条" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>
         <button class="snd" id="sndBtn" onclick="send()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </div>
     </div>
@@ -259,6 +260,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 marked.setOptions({highlight:(c,l)=>{if(l&&hljs.getLanguage(l))return hljs.highlight(c,{language:l}).value;return hljs.highlightAuto(c).value},breaks:true});
 
 let convs={},curId=null,streaming=false,curPage='chat';
+let lastSnapshot=null,lastSentText='';
 
 /* ===== Page switching ===== */
 function switchPage(page){
@@ -335,10 +337,15 @@ function autoH(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeig
 async function send(){
   const inp=document.getElementById('inp'),text=inp.value.trim();if(!text||streaming)return;
   if(!curId){curId='_pending_'+Date.now();convs[curId]={title:text.slice(0,30),msgs:[],loaded:true}}
-  const c=convs[curId];c.msgs.push({role:'user',content:text});
+  const c=convs[curId];
+  // Snapshot: save state before sending for undo
+  lastSnapshot=c.msgs.map(m=>({...m,thinking:m.thinking?[...m.thinking]:[]}));
+  lastSentText=text;
+  c.msgs.push({role:'user',content:text});
   if(c.msgs.length===1){c.title=text.slice(0,30);document.getElementById('pageTitle').textContent=c.title}
   renderList();const ai=c.msgs.length;c.msgs.push({role:'ai',content:'',thinking:[]});
   inp.value='';inp.style.height='auto';renderMsgs();streaming=true;document.getElementById('sndBtn').disabled=true;
+  document.getElementById('undoBtn').style.display='none';
   const m=c.msgs[ai];
   let answerSplit=-1;
   try{
@@ -376,6 +383,26 @@ async function send(){
   // Final render with images (streaming=false enables renderImages)
   upd(ai,m,answerSplit);
   document.getElementById('sndBtn').disabled=false;document.getElementById('inp').focus();
+  document.getElementById('undoBtn').style.display='';
+}
+
+async function undoSend(){
+  if(!lastSnapshot||!curId||streaming)return;
+  if(!confirm('确定撤回上一条消息？'))return;
+  const c=convs[curId];
+  // Restore snapshot
+  c.msgs=lastSnapshot;
+  // Restore text to input
+  const inp=document.getElementById('inp');
+  inp.value=lastSentText;
+  autoH(inp);
+  // Re-render
+  renderMsgs();renderList();
+  // Delete last 2 messages from server
+  const sendId=curId.startsWith('_pending_')?'':curId;
+  if(sendId){try{await fetch(`/api/conversations/${sendId}/last`,{method:'DELETE'})}catch(e){}}
+  lastSnapshot=null;lastSentText='';
+  document.getElementById('undoBtn').style.display='none';
 }
 
 function upd(idx,m,split){
@@ -471,10 +498,12 @@ async function doUpload(file){
 /* ===== Images ===== */
 function renderImages(html){
   try{
+    // 1. Markdown image syntax: ![alt](path)
     html=html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g,(alt,path)=>{
       if(path.startsWith('http'))return`<img src="${path}" alt="${alt}" onclick="viewImg(this.src)">`;
       return`<img src="/api/images/${encodeURIComponent(path)}" alt="${alt}" onclick="viewImg(this.src)">`});
-    html=html.replace(/(^|[^"'=])(images\/[A-Za-z0-9_\-]+\.(?:jpg|jpeg|png|gif|bmp|webp|svg))/gi,
+    // 2. Bare image paths: images/xxx.jpg or images/xxx (truncated by LLM)
+    html=html.replace(/(^|[^"'=])(images\/[0-9a-fA-F]{8,64}(?:\.(?:jpg|jpeg|png|gif|bmp|webp|svg))?)/g,
       (match,prefix,path)=>`${prefix}<img src="/api/images/${encodeURIComponent(path)}" alt="图片" style="max-width:300px;max-height:200px;border-radius:8px;cursor:pointer;margin:4px" onclick="viewImg(this.src)">`);
   }catch(e){console.warn('renderImages error:',e)}
   return html;
